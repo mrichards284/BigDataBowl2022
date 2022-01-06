@@ -1,0 +1,175 @@
+---
+title: "An Exploration of Optimal Punting Strategy"
+author: "Wei Peng, Marc Richards, Sam Walczak, and Jack Werner"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## 1. Introduction
+
+Punting seems simple: kick the ball as far and as high as possible (while avoiding a touchback). However, even a novice football fan knows it's not quite that straightforward. Among other complicating factors, we have: (1) physical limitations of punters, (2) the football field's natural boundaries, and (3) the punt returner's decision (return, fair catch, or allow the punt to hit the ground). Relatively little attention has been paid to understanding optimal punting strategy. Thus, we seek to develop a novel framework for optimizing punt location, under given conditions, while accounting for variation in punter ability. This framework helps answer many questions; for example, where should a punter aim, and with how much hang time, to maximize value when at the opponent 40 yardline? How does that compare to being at your own 20 yardline? How do optimal actions vary for good vs. bad punters? How much does hang time really matter?
+
+
+## 2. Methodology
+
+In this section, we define the framework for finding optimal punting actions.
+
+### 2.1 - Value Function
+
+Any optimization problem starts with the identification a value function, $V$. In football, a common value function for plays is Expected Points Added (EPA). As we search across intended landing locations $x, y$ and hang time, $t$, we evaluate $V(x,y,t)$. Figure 1 below outlines the flow chart for getting an EPA value for any punt play. 
+
+```{r figurename, echo=FALSE, fig.cap="Figure 1. Flow chart for Valuing a Single Play", out.width = '80%',fig.align='center'}
+knitr::include_graphics("score_function_plot.png")
+```
+
+While observing a real play, it's fairly simple to follow the flowchart to obtain a score. However, when analyzing and evaluating a hypothetical play, we must average across many possible predicted EPA values. Expanding further, for a single play, $i$, we consider input data, $X_{i}$, as the location of the players at time $T$ when the ball either lands or is caught, landing spot of the football, hang time, and starting yard line. Using this information, we generate a vector $p_i$ giving predicted probabilities for a fair catch, punt landing, and a return (except punts to the end zone, which result in a touchback and final yardline of 20, or punts out of bounds, which result in a final yardline at the point where the ball crossed out of bounds). Note that, due to their rarity, we don't consider fumbles and muffed punts. If the punt is returned, the final yardline is the net result of kick distance and return length. We generate expected return yards using the input data $X_i$. On instances where the punt lands, we generate predictions for the roll yards using input data $X_i$ and add them to the punt distance. In Table 1, below, we justify the generalizability of these models by comparing them to base rates and models using only pre-snap information.
+
+```{r Table1num2, echo=FALSE, fig.cap="Table 1. Out-of-sample loss comparisons. Pre-snap Models consider starting location, landing location and hang time. Info at Time T Models consider the position of the players time ball is caught/lands. Models fit using XGBOOST and tuned via 5-fold cv.", out.width = '70%',fig.align='center'}
+knitr::include_graphics("Model_losses_for_scoring.png")
+```
+
+Given the final yardline and time, expected points of play $i+1$ can be calculated fixing any other necessary information. The expected points from play $i$ was fixed except for varying starting yardline. We then calculate the weighted average of EPA by the vector of probabilities, $p_i$. Thus, our value function for play $i$ is as follows:
+
+$$
+\begin{aligned}
+V_i = f_i (x,y,t) = \sum_{m=1}^5 \hat p_{i,m} \hat {EPA}_{i,m}
+\end{aligned}
+$$
+
+
+
+### 2.2 - Conditional Variational Autoencoder (CVAE)
+
+Because punt outcome depends largely on positions of players when the ball is caught or lands, we need to simulate plays to get these positions. More formally, let $\xi_t$ denote the positions of the players and the football at time $t$, and let $T$ be the time when the ball is caught/lands. We hope to simulate a few plays given $S$, where $S$ represents the initial positions $\xi_0$ and the punting strategy (landing location and hang time). However, instead of modeling the whole path of $\mathbb{P}(\{\xi_t\}_{t\in [0,T]}\mid  s)$, we model $\mathbb{P}(\xi_T\mid s)$ directly since the punt outcome is largely determined by the positioning of the players at time $T$.
+
+
+
+```{r , echo=FALSE, fig.cap="Figure 2. <1> Data generating process; <2> Parameters learning process", out.width = '70%',fig.align='center'}
+knitr::include_graphics("cvae.png")
+```
+
+<br>
+
+The position of the returner is quite predictable, as the returner does not interact with other players while the ball is in the air. We use XGBoost (Chen, 2016) to predict the position of the returner given $\xi_0$ and $S$. However, for the other players, let $X$ be their positions at time $T$. We then assume that $P(x \mid s)$ is a marginal distribution of a joint distribution of $(Z,X)$ given by 
+
+$$
+\begin{aligned}
+p(z) & \sim\mathcal{N}(0, \,I) \\
+p_\theta(x \mid z;s)  & \sim \mathcal{N}(\mu_{z,s}, \,cI).
+\end{aligned}
+$$
+
+Here, $Z$ denotes latent variables not observed from the data, and $\theta$ denotes the unknown parameters. Thus, $p_\theta(x\mid s) = \int p(z) \cdot p_\theta(x\mid z;s)\,dz$. Instead of painstakingly specifying a family of distributions of $p_\theta(x\mid s)$ directly, hoping to cover the true distribution of the data, the marginal distribution of a relatively simple joint distribution is flexible enough to approximate the true underlying distribution of data. Moreover, this structure provides an efficient way to learn the parameters. We also know that, given the initial positions, landing location, and hang time, the final positions $X$ are determined by the decisions the players made when the ball is in the air. Those decisions are latent variables that we're interested in but cannot directly observe. Therefore introducing $Z$ allows us to quantify those latent decisions, and this framework allows us to simulate new plays. 
+
+
+As usual, we estimate $\theta$ by maximizing the the log-likelihood of the data $\log p_\theta(x\mid z;s)$. Due to intractability of calculating $p_\theta(x\mid z;s)$, and thanks to the introduction of latent variable, we can estimate $\theta$ in an iterative manner. For any distribution $q_\phi(z\mid x;s)$, we have:
+
+$$
+\begin{aligned}
+\log p_\theta(x\mid z;s) 
+& \geq  \mathbb{E}_{q_\phi(z\mid x;s)}[p_\theta(x\mid z;s)] - \mathrm{KL}(q_\phi(z\mid x;s) \,||\,p(z)) \\
+& =:  \mathcal{L}(\theta, \phi) 
+%& =: \text{reconstruction error} + \text{ regularization}.
+\end{aligned}
+$$
+
+Instead of maximizing $\log p_\theta(x\mid z;s)$ directly, we maximize a lower bound $\mathcal{L}(\theta,\phi)$ by introducing a variational distribution $q_\phi(z\mid x,s)$. 
+
+When imposing some neural network structure on $p_\theta(x\mid z;s)$ and $q_\phi(z\mid x;s)$, the learning algorithm can be illustrated in a graph in figure 2 <2>.  In short, the algorithm first compresses (encodes) $X$ into a low dimensional space to $Z$, then decompresses (decodes) back to $\hat{X}$. This algorithm is called a Conditional Variational Autoencoder (Sohn et al. 2015), a deep learning based generative model that has shown incredible ability to produce highly realistic pieces of content (e.g., images, text, and sounds). 
+
+With unsupervised learning, there is no convenient quantitative metric and thus we rely mostly on visual inspection. In Figure 3 below, we consider an example of $\xi_0, x, y, t$ and generate 4 copies of final player locations at time $T$ and see if they look "realistic". 
+
+```{r , echo=FALSE, fig.cap="Figure 3. Samples of final positions of the players and the football generated by cvae given the inital positions, landing location and hang time.", out.width = '80%',fig.align='center'}
+knitr::include_graphics("sampled_final_locations_v3.png")
+```
+
+<br>
+The sampled final positions at time $T$ appear reasonable. Note that the vises closely follow the gunners, and the vises and gunners are the closest players to the returner at time $T$. Additionally, all players move toward the returner, and the returner is at the position of the football. 
+
+
+
+### 2.3 - Execution Distribution
+
+We know that a punter can't simply put the ball anywhere he wants on the field. In practice, actual landing location varies around the intended landing location. Further, different punters have different abilities to punt the ball high and far. To truly identify the optimal action for a punter with a certain level of ability, we are interested in the conditional distribution:
+
+
+$$
+\begin{aligned}
+(x,y,t) \mid  (x^*,y^*, t^*) \sim p(x,y,t \mid x^*, y^*, t^*)
+\end{aligned}
+$$
+
+where $(x,y,t)$ is the actual landing location and hang time and $(x^*,y^*,t^*)$ are the intended landing location and hang time. Then for each $(x^*,y^*,t^*)$ we compute $\mathbb{E}[s \mid x^*,y^*, t^*] = \int f(x,y,t) p(x,y,t \mid x^*, y^*, t^*)$ and the optimal intended location is simply:
+
+$$
+\begin{aligned}
+\text{arg max}_{x^*,y^*, t^*} \mathbb{E}[v \mid x^*,y^*, t^*].
+\end{aligned}
+$$
+
+Since we already have $f(x,y,t)$ as defined in seciton 2.1, we just need to define $p(x,y,t \mid x^*, y^*, t^*)$. We assume this distribution to be roughly normally distributed as follows:
+
+$$
+\begin{aligned}
+p(x,y,t \mid x^*, y^*, t^*) \sim N(\mu^*, \Sigma^*)
+\end{aligned}
+$$
+
+where $\mu \in \mathbb{R}^3$ and $\Sigma \in \mathbb{R}^{3x3}$. We consider controllable parameters $\delta \in \mathbb{R}^{3}$ and $\epsilon \in \mathbb{R}$ where $\delta$ serves as a reasonable maximum value for the mean of the $x, y, t$, respectively, while $\epsilon$ is simply an arbitrary scalar of the covariance matrix. Thus, $\Sigma^* = \epsilon \Sigma_0$. In order to get reasonable estimates for $\Sigma_0$, we identified groups of punts with similar characteristics—PFF intended direction, starting yardline, etc—and observed the variability. We assume punters are aiming for the same spot, and we use standard methods to estimate the empirical variance. Note that this is a conservative assumption and likely overstates the covariance matrix. 
+
+### 2.4 - Pseudo Code
+
+We summarize our process with pseudo code below. First, generate a look up table using CVAE model (section 2.2) and valuing process (section 2.1) for each $(x,y,t)$ given a set of starting x and y locations and initial positions. Then, define an execution distribution, sample referencing the look up table and compute the expectation (section 2.3).
+
+```{r algorithm1, echo=FALSE, out.width = '90%',fig.align='center'}
+knitr::include_graphics("pseudo_code_v2.png")
+```
+
+
+## 3. Results
+
+Each plot shows the optimal intended punt location under various conditions, with the colored squares showing the EPA associated with aiming for that location.
+
+### 3.1 - Optimal Action - with Perfect Execution
+
+Figure 5 below shows optimal punt locations under perfect execution. In this scenario, a perfect punt would land just out of bounds at the half yardline, which fits our intuition.
+
+```{r figure3.1, echo=FALSE, fig.cap="Figure 4. Optimal Punt Location EPA under Perfect Execution", out.width = '50%',fig.align='center'}
+knitr::include_graphics("results_3_1_perfect_execution.png")
+```
+
+### 3.2 - Optimal Action - with Varying Epsilon
+
+As noted in section 2.3, perfect execution is not realistic. Thus, in Figure 6, we explore how varying the controllable scaling parameter $\epsilon$ affects optimal intended punting location. With the ball at the opponent 40 yardline, we observe that optimal strategy suggests less precise punters, $\epsilon = 1$, should aim for the center of the field around the 10-12 yardline and more precise punters, $\epsilon = 0.1$, should aim out of bounds inside the 10 yardline.
+
+```{r figure3.2, echo=FALSE, fig.cap="Figure 5. Optimal Punt Location under varying epsilon.", out.width = '80%',fig.align='center'}
+knitr::include_graphics("results_3_2_varying_epsilon.png")
+```
+
+
+### 3.3 - Optimal Action - with Varying Starting Yardline
+
+Figure 7 below fixes the $\epsilon$, hang time, and starting y while varying the starting yardline. We observe that, when punting from your own 20 yardline, aiming for a couple yards from the sideline and 50 yards downfield is optimal, but, when at the opponent 40 yardline, aiming for the middle of the field around the 10-12 yardline is optimal. This is likely due to a punt return being more likely when aiming in the middle of the field at your own 20 vs. the opponent 40.
+
+```{r figure3.3, echo=FALSE, fig.cap="Figure 6. Optimal Punt Location under varying starting yardlines.", out.width = '80%',fig.align='center'}
+knitr::include_graphics("results_3_3_varying_starting_yardline.png")
+```
+
+
+### 3.4 - Optimal Action - with Varying Hang Time
+
+We fix the starting yardline to be at your own 20 yardline and allow hang time to vary. We observe that, as we increase hang time from 4 to 5 seconds, there is an ever so slight increase in EPA for intending to punt the ball to the middle of the field. This is intuitive; the longer the punt is in the air, the more likely the coverage team is to get downfield and limit the possibility of a return. However, the effect appears minimal at best, suggesting that maybe hang time is not quite as important as conventionally thought.
+
+```{r figure3.4, echo=FALSE, fig.cap="Figure 7. Optimal Intended Punt Location under varying hang times.", out.width = '80%',fig.align='center'}
+knitr::include_graphics("results_3_4_varing_hang_time.png")
+```
+
+## 4. Discussion
+
+We have developed a framework for evaluating optimal punter strategies under various conditions, while showing how optimal punt strategy varies with the punter's ability, starting yardline, and hang time. There are a number of areas for further work. First, further refinement of the models used would improve upon our accuracy. There are also more outcomes than we considered (e.g., account for the probability of a penalty, fumble, muffed punt, etc.). Also, we could incorporate different states of weather (e.g., snow, rain, high wind, etc.). Additionally, exploration of different formations and pressure states, could provide further insight, as we only considered conservative initial positions. Teams also could get a better estimate for their own punter's $\Sigma$, which would allow for more precise model estimates. Finally, while EPA is a commonly used value function for plays, other value functions should also be investigated.
+
+
+## 5. Appendix
+
+Code is available on Github.
